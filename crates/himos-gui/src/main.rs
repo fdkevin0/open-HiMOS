@@ -1,11 +1,11 @@
 //! Desktop operator panel for the DM-850G.
 //!
-//! Three disclosure levels (overview, details, advanced) on top of one serial
+//! Four pages (overview, details, advanced, history) on top of one serial
 //! worker thread; the port is detected asynchronously and re-scanned while
 //! missing, so neither enumeration nor I/O ever blocks a frame.
 //!
 //! Command line: `--smoke <seconds>` prints a summary and exits, `--screenshot
-//! <png>` renders one frame and exits, `--level overview|details|advanced`
+//! <png>` renders one frame and exits, `--level overview|details|advanced|history`
 //! selects the initial page, `--port <name>` overrides autodetection, and
 //! `--help` prints usage. `--smoke` exits with status 1 when no frame arrived.
 
@@ -152,6 +152,25 @@ struct Options {
     help: bool,
 }
 
+impl Options {
+    fn validate_durations(&self) -> Result<(), std::io::Error> {
+        for (name, seconds) in [
+            ("--settle", Some(self.settle_secs)),
+            ("--smoke", self.smoke_secs),
+        ] {
+            if let Some(seconds) = seconds {
+                Duration::try_from_secs_f64(seconds).map_err(|err| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("invalid {name} duration: {err}"),
+                    )
+                })?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// GUI application state.
 #[expect(
     clippy::struct_excessive_bools,
@@ -160,6 +179,7 @@ struct Options {
 struct App {
     level: Level,
     port: Option<String>,
+    port_override: Option<String>,
     tx: Option<Sender<ToWorker>>,
     rx: Option<Receiver<FromWorker>>,
     worker: Option<JoinHandle<()>>,
@@ -175,7 +195,6 @@ struct App {
     window: WindowState,
     fullscreen: bool,
     geometry_restored: bool,
-    cpu_usage: Option<f32>,
     settle_secs: f64,
     archive_enabled: bool,
     history: History,
@@ -211,6 +230,7 @@ impl App {
         let history_window = options.history_span.unwrap_or(HistoryWindow::OneHour);
         Self {
             level: options.level.unwrap_or(Level::Overview),
+            port_override: options.port.clone(),
             port: options.port,
             tx: None,
             rx: None,
@@ -227,7 +247,6 @@ impl App {
             window,
             fullscreen: false,
             geometry_restored: false,
-            cpu_usage: None,
             settle_secs: options.settle_secs,
             archive_enabled,
             history: History::default(),
@@ -386,22 +405,22 @@ impl App {
 
         // Once the native window is up, pull an off-screen rectangle back and
         // apply the restored size through the windowing API.
-        if let Some(monitor) = monitor {
-            if !self.geometry_restored {
-                self.geometry_restored = true;
-                if !self.window.maximized {
-                    let clamped = self.window.clamped_to(monitor);
-                    if clamped != self.window {
-                        if let Some(position) = clamped.position {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(position));
-                        }
-                        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
-                            clamped.width,
-                            clamped.height,
-                        )));
+        if let Some(monitor) = monitor
+            && !self.geometry_restored
+        {
+            self.geometry_restored = true;
+            if !self.window.maximized {
+                let clamped = self.window.clamped_to(monitor);
+                if clamped != self.window {
+                    if let Some(position) = clamped.position {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(position));
                     }
-                    self.window = clamped;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                        clamped.width,
+                        clamped.height,
+                    )));
                 }
+                self.window = clamped;
             }
         }
 
@@ -460,7 +479,12 @@ impl App {
         }
         let (sender, receiver) = mpsc::channel();
         self.detect_rx = Some(receiver);
+        let port_override = self.port_override.clone();
         std::thread::spawn(move || {
+            if let Some(port) = port_override {
+                let _ = sender.send(Detection::Found(port));
+                return;
+            }
             let outcome = match SerialLink::detect() {
                 Ok(Some(info)) => Detection::Found(info.port_name),
                 Ok(None) => {
@@ -627,6 +651,7 @@ impl App {
                     self.push_log(format!("connected to {port}"));
                 }
                 FromWorker::Error(err) => {
+                    self.connected = false;
                     self.push_log(format!("error: {err}"));
                     self.error = Some(err);
                 }
@@ -642,30 +667,17 @@ impl App {
         }
     }
 
-    /// Requests one frame, saves it as PNG, then exits (used by the docs script).
+    /// Requests one frame, saves it as PNG, then exits for documentation capture.
     fn maybe_screenshot(&mut self, ctx: &egui::Context) {
         let Some(path) = self.screenshot.clone() else {
             return;
         };
-        let settled = self.started.elapsed() >= Duration::from_secs_f64(self.settle_secs);
+        let settled = self.started.elapsed().as_secs_f64() >= self.settle_secs;
         if !self.shot_requested
             && settled
             && (self.frames_seen >= 5 || self.started.elapsed() > Duration::from_secs(8))
         {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
-            self.shot_requested = true;
-        }
-        if !self.shot_requested {
-            return;
-        }
-        let shot = ctx.input(|input| {
-            input.events.iter().find_map(|event| match event {
-                egui::Event::Screenshot { image, .. } => Some(std::sync::Arc::clone(image)),
-                _ => None,
-            })
-        });
-        if let Some(frame_image) = shot {
-            match save_png(&path, &frame_image) {
+            ctx.request_screenshot(move |frame_image| match save_png(&path, &frame_image) {
                 Ok(()) => {
                     println!("screenshot saved to {path}");
                     std::process::exit(0);
@@ -674,63 +686,67 @@ impl App {
                     eprintln!("screenshot failed: {err}");
                     std::process::exit(1);
                 }
-            }
+            });
+            self.shot_requested = true;
         }
-        if self.started.elapsed() > Duration::from_secs_f64(20.0 + self.settle_secs) {
+        if !self.shot_requested {
+            return;
+        }
+        if self.started.elapsed().as_secs_f64() > 20.0 + self.settle_secs {
             eprintln!("screenshot timed out");
             std::process::exit(1);
         }
     }
 
     /// Brand bar, status strip, tabs, and footer.
-    fn draw_chrome(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("masthead")
-            .exact_height(48.0)
+    fn draw_chrome(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::top("masthead")
+            .exact_size(48.0)
             .frame(
                 egui::Frame::NONE
                     .fill(palette().bar)
                     .inner_margin(egui::Margin::symmetric(16, 0)),
             )
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     self.masthead(ui);
                 });
             });
 
-        egui::TopBottomPanel::top("status")
-            .exact_height(38.0)
+        egui::Panel::top("status")
+            .exact_size(38.0)
             .frame(
                 egui::Frame::NONE
                     .fill(palette().bg)
                     .inner_margin(egui::Margin::symmetric(16, 0)),
             )
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     self.status_strip(ui);
                 });
             });
 
-        egui::TopBottomPanel::top("tabs")
-            .exact_height(42.0)
+        egui::Panel::top("tabs")
+            .exact_size(42.0)
             .frame(
                 egui::Frame::NONE
                     .fill(palette().bg)
                     .inner_margin(egui::Margin::symmetric(16, 0)),
             )
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     self.tabs(ui);
                 });
             });
 
-        egui::TopBottomPanel::bottom("footer")
-            .exact_height(26.0)
+        egui::Panel::bottom("footer")
+            .exact_size(26.0)
             .frame(
                 egui::Frame::NONE
                     .fill(palette().bar)
                     .inner_margin(egui::Margin::symmetric(16, 0)),
             )
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     self.footer(ui);
                 });
@@ -738,14 +754,14 @@ impl App {
     }
 
     /// Central panel with the selected disclosure level.
-    fn draw_content(&mut self, ctx: &egui::Context) {
+    fn draw_content(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::NONE
                     .fill(palette().bg)
                     .inner_margin(egui::Margin::symmetric(16, 14)),
             )
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| match self.level {
@@ -783,31 +799,12 @@ fn stamp(elapsed: Duration) -> String {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.refresh_uptime();
         self.reap_workers();
         self.poll_detection();
         self.poll_accent();
         self.refresh_theme(ctx);
-        self.handle_window(ctx);
-
-        let requested = ctx.input(|input| {
-            if input.key_pressed(egui::Key::Num1) {
-                Some(Level::Overview)
-            } else if input.key_pressed(egui::Key::Num2) {
-                Some(Level::Details)
-            } else if input.key_pressed(egui::Key::Num3) {
-                Some(Level::Advanced)
-            } else if input.key_pressed(egui::Key::Num4) {
-                Some(Level::History)
-            } else {
-                None
-            }
-        });
-        if let Some(level) = requested {
-            self.level = level;
-        }
-
         // Autodetection loop: look for the PSU, connect, retry after a drop.
         if self.auto_connect
             && self.tx.is_none()
@@ -834,14 +831,35 @@ impl eframe::App for App {
         }
 
         self.drain_events();
-        self.cpu_usage = frame.info().cpu_usage;
         self.sample_history();
         self.sync_title(ctx);
         self.maybe_screenshot(ctx);
         ctx.request_repaint_after(Duration::from_millis(200));
+    }
 
-        self.draw_chrome(ctx);
-        self.draw_content(ctx);
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx();
+        self.handle_window(ctx);
+
+        let requested = ctx.input(|input| {
+            if input.key_pressed(egui::Key::Num1) {
+                Some(Level::Overview)
+            } else if input.key_pressed(egui::Key::Num2) {
+                Some(Level::Details)
+            } else if input.key_pressed(egui::Key::Num3) {
+                Some(Level::Advanced)
+            } else if input.key_pressed(egui::Key::Num4) {
+                Some(Level::History)
+            } else {
+                None
+            }
+        });
+        if let Some(level) = requested {
+            self.level = level;
+        }
+
+        self.draw_chrome(ui);
+        self.draw_content(ui);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -861,7 +879,13 @@ fn parse_args_from<I: IntoIterator<Item = String>>(args: I) -> Options {
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--smoke" => options.smoke_secs = args.next().and_then(|value| value.parse().ok()),
+            "--smoke" => {
+                options.smoke_secs = Some(
+                    args.next()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(f64::NAN),
+                );
+            }
             "--port" => options.port = args.next(),
             "--screenshot" => options.screenshot = args.next(),
             "--level" => options.level = args.next().and_then(|value| parse_level(&value)),
@@ -871,7 +895,7 @@ fn parse_args_from<I: IntoIterator<Item = String>>(args: I) -> Options {
                 options.settle_secs = args
                     .next()
                     .and_then(|value| value.parse().ok())
-                    .unwrap_or(0.0);
+                    .unwrap_or(f64::NAN);
             }
             "--history-span" => {
                 options.history_span = args
@@ -927,6 +951,9 @@ fn main() -> eframe::Result {
         print_usage();
         return Ok(());
     }
+    options
+        .validate_durations()
+        .map_err(|err| eframe::Error::AppCreation(Box::new(err)))?;
     if let Some(dir) = &options.data_dir {
         sys::set_data_dir(Some(std::path::PathBuf::from(dir)));
     }
@@ -950,8 +977,6 @@ fn main() -> eframe::Result {
     };
     let native_options = eframe::NativeOptions {
         viewport: window.viewport(),
-        // GPU when the driver provides OpenGL 2.0+; otherwise the driver decides.
-        hardware_acceleration: eframe::HardwareAcceleration::Preferred,
         ..Default::default()
     };
     eframe::run_native(
@@ -1007,6 +1032,116 @@ mod tests {
         assert!(!state.is_fresh());
         assert!(state.fresh_status().is_none());
         assert!(state.fresh_aux().is_none());
+    }
+
+    #[test]
+    fn explicit_port_is_used_for_startup_and_reconnect() {
+        let options = parse_args_from(["--port", "manual-port"].map(str::to_owned));
+        let mut app = App::new(options, Appearance::default(), WindowState::default());
+        for _ in 0..2 {
+            app.start_detect();
+            let event = app
+                .detect_rx
+                .take()
+                .expect("detection started")
+                .recv_timeout(Duration::from_secs(2))
+                .expect("override resolved");
+            assert!(matches!(event, Detection::Found(port) if port == "manual-port"));
+            app.port = None;
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_gui_durations() {
+        for flag in ["--settle", "--smoke"] {
+            for value in ["-1", "NaN", "inf", "1e300", "abc"] {
+                let options = parse_args_from([flag, value].map(str::to_owned));
+                assert!(
+                    options.validate_durations().is_err(),
+                    "accepted {flag} {value}"
+                );
+            }
+            assert!(
+                parse_args_from([flag].map(str::to_owned))
+                    .validate_durations()
+                    .is_err()
+            );
+            assert!(
+                parse_args_from([flag, "0"].map(str::to_owned))
+                    .validate_durations()
+                    .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn hidden_logic_does_not_replay_keyboard_input() {
+        use eframe::App as _;
+        let ctx = egui::Context::default();
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut app = App::new(
+            Options::default(),
+            Appearance::default(),
+            WindowState::default(),
+        );
+        app.auto_connect = false;
+        app.accent_attempted = true;
+        let mut input = egui::RawInput::default();
+        for key in [egui::Key::F11, egui::Key::Num4] {
+            input.events.push(egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        let mut output = ctx.run_ui(input, |ui| {
+            app.logic(ui.ctx(), &mut frame);
+            app.ui(ui, &mut frame);
+        });
+        output.textures_delta.clear();
+        assert!(app.fullscreen, "visible F11 enters fullscreen");
+        assert_eq!(app.level, Level::History);
+        app.level = Level::Overview;
+        for _ in 0..2 {
+            let _ = ctx.run_logic(&egui::RawInput::default(), |ctx| app.logic(ctx, &mut frame));
+            assert!(app.fullscreen, "hidden logic must not replay F11");
+            assert_eq!(
+                app.level,
+                Level::Overview,
+                "hidden logic must not replay navigation"
+            );
+        }
+    }
+
+    #[test]
+    fn link_error_disables_controls_until_reconnected() {
+        let mut app = App::new(
+            Options::default(),
+            Appearance::default(),
+            WindowState::default(),
+        );
+        let (events, receiver) = mpsc::channel();
+        let (commands, receiver_commands) = mpsc::channel();
+        app.rx = Some(receiver);
+        app.tx = Some(commands);
+        events
+            .send(FromWorker::Connected("test".into()))
+            .expect("event receiver alive");
+        app.drain_events();
+        assert!(app.connected);
+        events
+            .send(FromWorker::Error("link lost".into()))
+            .expect("event receiver alive");
+        app.drain_events();
+        assert!(!app.send(Frame::new(CMD_STATUS, []), "test"));
+        assert!(receiver_commands.try_recv().is_err());
+        events
+            .send(FromWorker::Connected("test".into()))
+            .expect("event receiver alive");
+        app.drain_events();
+        assert!(app.send(Frame::new(CMD_STATUS, []), "test"));
     }
 
     #[test]

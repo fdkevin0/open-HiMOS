@@ -5,17 +5,15 @@ members = ["crates/himos-core", "crates/himos-cli", "crates/himos-gui"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/fdkevin0/open-HiMOS"
 
 [workspace.dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-eframe = "0.32"
+eframe = { version = "0.37", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "links", "wayland", "web_screen_reader", "x11"] }
 serialport = "4"
-serde = { version = "1", features = ["derive"] }
-serde_yaml = "0.9"
 thiserror = "2"
 
 # BeautifulRust lints, workspace form.

@@ -4,7 +4,6 @@
 //! `0x02`/`0x04` frame, then reports how each extended field moves with power.
 
 use std::io::Write as _;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -67,6 +66,16 @@ pub(crate) struct Options {
 ///
 /// Returns an error when the port cannot be opened or the protocol fails.
 pub(crate) fn run(options: &Options) -> Result<()> {
+    let load_start =
+        Duration::try_from_secs_f64(options.idle_s).context("invalid idle duration")?;
+    let load = Duration::try_from_secs_f64(options.load_s).context("invalid load duration")?;
+    let tail = Duration::try_from_secs_f64(options.tail_s).context("invalid tail duration")?;
+    let load_end = load_start
+        .checked_add(load)
+        .context("calibration duration overflow")?;
+    let finish = load_end
+        .checked_add(tail)
+        .context("calibration duration overflow")?;
     let link = SerialLink::open_retry(&options.port)
         .with_context(|| format!("opening {}", options.port))?;
     let mut session = Session::new(link);
@@ -77,51 +86,73 @@ pub(crate) fn run(options: &Options) -> Result<()> {
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    let stop = Arc::new(AtomicBool::new(false));
+    let samples = collect_samples(&mut session, load_start, load_end, finish)?;
+    report(&samples, options.csv.as_deref())
+}
+
+/// Signals before the thread scope joins, including on errors and unwinding.
+struct StopOnDrop<'load>(&'load AtomicBool);
+
+impl Drop for StopOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+fn collect_samples<L: himos_core::Link>(
+    session: &mut Session<L>,
+    load_start: Duration,
+    load_end: Duration,
+    finish: Duration,
+) -> Result<Vec<Sample>> {
+    let stop = AtomicBool::new(false);
     let start = Instant::now();
-    let load_start = start + Duration::from_secs_f64(options.idle_s);
-    let load_end = load_start + Duration::from_secs_f64(options.load_s);
-    let finish = load_end + Duration::from_secs_f64(options.tail_s);
 
-    let mut loaders = Vec::new();
-    let mut samples: Vec<Sample> = Vec::new();
-    let mut latest_aux: Option<(Instant, Vec<u16>)> = None;
-    let mut buf = [0u8; 256];
+    std::thread::scope(|scope| {
+        let _stop_on_exit = StopOnDrop(&stop);
+        let mut loaders = Vec::new();
+        let mut samples: Vec<Sample> = Vec::new();
+        let mut latest_aux: Option<(Instant, Vec<u16>)> = None;
+        let mut buf = [0u8; 256];
 
-    while Instant::now() < finish {
-        let now = Instant::now();
-        let phase = if now < load_start {
-            Phase::Idle
-        } else if now < load_end {
-            Phase::Load
-        } else {
-            Phase::Tail
-        };
-        if phase == Phase::Load && loaders.is_empty() {
-            println!("starting CPU load for {} s", options.load_s);
-            for _ in 0..std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get)
-            {
-                let stop = Arc::clone(&stop);
-                loaders.push(std::thread::spawn(move || burn(&stop)));
-            }
-        }
-        if now >= load_end && !loaders.is_empty() {
-            stop.store(true, Ordering::Relaxed);
-            for handle in loaders.drain(..) {
-                let _ = handle.join();
-            }
-        }
-
-        for frame in session.poll(&mut buf).context("reading")? {
-            match frame.cmd() {
-                CMD_AUX => {
-                    if let Ok(aux) = AuxTelemetry::parse(frame.payload()) {
-                        latest_aux = Some((Instant::now(), aux.raw_words));
-                    }
+        while start.elapsed() < finish {
+            let now = start.elapsed();
+            let phase = if now < load_start {
+                Phase::Idle
+            } else if now < load_end {
+                Phase::Load
+            } else {
+                Phase::Tail
+            };
+            if phase == Phase::Load && loaders.is_empty() {
+                println!(
+                    "starting CPU load for {} s",
+                    load_end.saturating_sub(load_start).as_secs_f64()
+                );
+                for _ in
+                    0..std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get)
+                {
+                    loaders.push(scope.spawn(|| burn(&stop)));
                 }
-                CMD_STATUS => {
-                    if let Ok(status) = PsuStatus::parse(frame.payload()) {
-                        if let Some((at, aux)) = latest_aux.take() {
+            }
+            if now >= load_end && !loaders.is_empty() {
+                stop.store(true, Ordering::Relaxed);
+                for handle in loaders.drain(..) {
+                    let _ = handle.join();
+                }
+            }
+
+            for frame in session.poll(&mut buf).context("reading")? {
+                match frame.cmd() {
+                    CMD_AUX => {
+                        if let Ok(aux) = AuxTelemetry::parse(frame.payload()) {
+                            latest_aux = Some((Instant::now(), aux.raw_words));
+                        }
+                    }
+                    CMD_STATUS => {
+                        if let Ok(status) = PsuStatus::parse(frame.payload())
+                            && let Some((at, aux)) = latest_aux.take()
+                        {
                             // Only pair frames that arrived close together; a
                             // stale aux frame would silently skew the stats.
                             if at.elapsed() <= AUX_PAIR_WINDOW {
@@ -133,13 +164,13 @@ pub(crate) fn run(options: &Options) -> Result<()> {
                             }
                         }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
         }
-    }
 
-    report(&samples, options.csv.as_deref())
+        Ok(samples)
+    })
 }
 
 fn burn(stop: &AtomicBool) {
@@ -247,5 +278,54 @@ fn pearson(xs: &[f32], ys: &[f32]) -> f64 {
         0.0
     } else {
         covariance / (variance_x.sqrt() * variance_y.sqrt())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestLink {
+        fail: bool,
+    }
+
+    impl himos_core::Link for TestLink {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            if self.fail {
+                Err(std::io::Error::other("injected read failure"))
+            } else {
+                std::thread::sleep(Duration::from_millis(30));
+                Ok(0)
+            }
+        }
+
+        fn write_all(&mut self, _: &[u8]) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn load_workers_stop_on_zero_tail_and_read_error() {
+        for fail in [false, true] {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let mut session = Session::new(TestLink { fail });
+                let load_end = Duration::from_millis(20);
+                let result = collect_samples(&mut session, Duration::ZERO, load_end, load_end);
+                tx.send(result).expect("test receiver alive");
+            });
+            let result = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("CPU workers must stop before sampling returns");
+            if fail {
+                assert!(
+                    format!("{:#}", result.expect_err("read fails"))
+                        .contains("injected read failure")
+                );
+            } else {
+                assert!(result.expect("zero-tail run completes").is_empty());
+            }
+            worker.join().expect("sampling thread succeeds");
+        }
     }
 }

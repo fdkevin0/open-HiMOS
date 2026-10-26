@@ -177,20 +177,15 @@ impl App {
     pub(crate) fn footer(&self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.label(
-                RichText::new("open-HiMOS · Segotep DM-850G · protocol v0.3")
+                RichText::new("open-HiMOS · Segotep DM-850G")
                     .size(9.0)
                     .color(palette().muted),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let cpu = self
-                    .cpu_usage
-                    .map_or_else(|| "--".to_owned(), |usage| format!("{:.1}%", usage * 100.0));
                 ui.label(
-                    RichText::new(format!(
-                        "egui · glow · CPU {cpu} · automatic port detection"
-                    ))
-                    .size(9.0)
-                    .color(palette().muted),
+                    RichText::new("1–4 pages · F11 fullscreen")
+                        .size(9.0)
+                        .color(palette().muted),
                 );
                 if let Some(error) = &self.error {
                     ui.label(RichText::new(error).size(9.0).color(palette().warn));
@@ -334,12 +329,11 @@ impl App {
                     let selected = current.is_some_and(|value| value.millis() == millis);
                     let label = format!("{:.1} S", f32::from(millis) / 1000.0);
                     let mark = if selected { Mark::On } else { Mark::Off };
-                    if mode_button(ui, mark, &label).clicked() {
-                        if let Ok(next) = RefreshInterval::try_new(millis) {
-                            if self.send(set_refresh_interval(next), "interval") {
-                                self.interval = Some(next);
-                            }
-                        }
+                    if mode_button(ui, mark, &label).clicked()
+                        && let Ok(next) = RefreshInterval::try_new(millis)
+                        && self.send(set_refresh_interval(next), "interval")
+                    {
+                        self.interval = Some(next);
                     }
                 }
             });

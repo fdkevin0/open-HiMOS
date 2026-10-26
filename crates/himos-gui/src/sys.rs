@@ -15,14 +15,14 @@ pub(crate) fn system_accent() -> Option<Color32> {
 /// Application data directory, resolved once and cached.
 static DATA_DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
 
-/// Overrides the data directory (`--data-dir`, `HIMOS_DATA_DIR`); call before
+/// Sets the explicit data directory (`--data-dir`); call before
 /// the first [`data_dir`] use. An unwritable override is reported by the caller.
 pub(crate) fn set_data_dir(dir: Option<PathBuf>) {
     let _ = DATA_DIR.set(dir);
 }
 
-/// First writable candidate: explicit override, then the platform config dir,
-/// then a temp fallback, then the working directory (portable/read-only setups).
+/// Uses the explicit override unchanged, otherwise the first writable candidate:
+/// `HIMOS_DATA_DIR`, platform config directory, temp, then working directory.
 pub(crate) fn data_dir() -> Option<PathBuf> {
     DATA_DIR.get_or_init(resolve_data_dir).clone()
 }

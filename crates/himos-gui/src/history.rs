@@ -1,8 +1,8 @@
 //! Rolling telemetry history, CSV archive and trend statistics.
 //!
-//! The operator panel keeps the last hour of samples in memory (fixed ring
+//! The operator panel keeps up to two hours of samples in memory (fixed ring
 //! buffer, one sample per second) and appends every sample to a rotating CSV
-//! file, so the chart is cheap and the data survives restarts.
+//! file. The archive survives restarts; the chart starts empty each run.
 
 use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
@@ -319,7 +319,7 @@ pub(crate) fn csv_line(sample: &Sample) -> String {
 #[derive(Debug)]
 pub(crate) struct Recorder {
     path: PathBuf,
-    writer: BufWriter<File>,
+    writer: Option<BufWriter<File>>,
 }
 
 impl Recorder {
@@ -334,14 +334,28 @@ impl Recorder {
         }
         Ok(Self {
             path: path.to_path_buf(),
-            writer,
+            writer: Some(writer),
         })
     }
 
     /// Appends one sample.
     pub(crate) fn append(&mut self, sample: &Sample) -> io::Result<()> {
-        writeln!(self.writer, "{}", csv_line(sample))?;
-        self.writer.flush()
+        if let Some(writer) = &mut self.writer {
+            writer.flush()?;
+            if writer.get_ref().metadata()?.len() > MAX_ARCHIVE_BYTES {
+                // Close before renaming so rotation also works on Windows.
+                self.writer = None;
+            }
+        }
+        if self.writer.is_none() {
+            *self = Self::open(&self.path)?;
+        }
+        let writer = self
+            .writer
+            .as_mut()
+            .expect("archive reopened before appending");
+        writeln!(writer, "{}", csv_line(sample))?;
+        writer.flush()
     }
 
     /// Where the archive lives.
@@ -485,6 +499,33 @@ mod tests {
         let columns = line.split(',').count();
         assert_eq!(columns, CSV_HEADER.split(',').count());
         assert!(line.starts_with("1700000005.000,5.000,151.30,12.089"));
+    }
+
+    #[test]
+    fn recorder_rotates_without_restarting() {
+        let dir = std::env::temp_dir().join(format!("himos-rotation-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create test directory");
+        let path = dir.join("history.csv");
+        let mut recorder = Recorder::open(&path).expect("open archive");
+        recorder
+            .append(&sample(0.0, 100.0, 12.0))
+            .expect("first sample");
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open sparse archive")
+            .set_len(MAX_ARCHIVE_BYTES + 1)
+            .expect("grow archive");
+        recorder
+            .append(&sample(1.0, 110.0, 12.1))
+            .expect("rotate and append");
+        assert!(std::fs::metadata(&path).expect("archive metadata").len() < MAX_ARCHIVE_BYTES);
+        let text = std::fs::read_to_string(&path).expect("new archive");
+        assert_eq!(text.lines().count(), 2, "header and new sample");
+        assert!(text.contains("110.00"));
+        assert_eq!(std::fs::read_dir(&dir).expect("list archives").count(), 2);
+        drop(recorder);
+        std::fs::remove_dir_all(dir).expect("remove test directory");
     }
 
     #[test]

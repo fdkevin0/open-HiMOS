@@ -192,7 +192,9 @@ impl AuxTelemetry {
             });
         }
         let raw_words = payload
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| u16::from(pair[0]) | (u16::from(pair[1]) << 8))
             .collect();
         Ok(Self {
@@ -294,7 +296,7 @@ impl RefreshInterval {
     /// multiple of [`Self::STEP_MS`].
     pub fn try_new(ms: u16) -> Result<Self, IntervalError> {
         let in_range = (Self::MIN_MS..=Self::MAX_MS).contains(&ms);
-        if !in_range || (ms - Self::MIN_MS) % Self::STEP_MS != 0 {
+        if !in_range || !(ms - Self::MIN_MS).is_multiple_of(Self::STEP_MS) {
             return Err(IntervalError { ms });
         }
         let steps = (ms - Self::MIN_MS) / Self::STEP_MS;
@@ -365,16 +367,34 @@ pub fn set_refresh_interval(interval: RefreshInterval) -> Frame {
     Frame::new(CMD_REFRESH, [0x00, interval.code()])
 }
 
+/// Reasons a custom fan curve cannot be encoded.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CurveError {
+    /// A duty cycle exceeds 100 percent.
+    #[error("duty cycle {0} exceeds 100 percent")]
+    InvalidDuty(u8),
+    /// The curve exceeds the frame payload limit.
+    #[error(transparent)]
+    Frame(#[from] FrameError),
+}
+
 /// Builds a custom fan curve request; the device implies `(0,0)` and `(100,100)`.
 ///
 /// # Errors
 ///
-/// Returns [`FrameError::PayloadTooLong`] when the curve has too many points for
+/// Returns [`CurveError::InvalidDuty`] for duty cycles above 100 percent, or
+/// [`CurveError::Frame`] when the curve has too many points for
 /// the protocol's one-byte length field (117 points already exceed it).
-pub fn set_custom_curve(points: &[CurvePoint]) -> Result<Frame, FrameError> {
+pub fn set_custom_curve(points: &[CurvePoint]) -> Result<Frame, CurveError> {
+    for point in points {
+        if point.duty_percent > 100 {
+            return Err(CurveError::InvalidDuty(point.duty_percent));
+        }
+    }
     let payload_len = 1 + CURVE_TEMP_TABLE.len() + CURVE_DUTY_TABLE.len() + points.len() * 2;
     if payload_len > MAX_PAYLOAD {
-        return Err(FrameError::PayloadTooLong(payload_len));
+        return Err(FrameError::PayloadTooLong(payload_len).into());
     }
     let mut payload = Vec::with_capacity(payload_len);
     payload.push(0x00);
@@ -387,7 +407,11 @@ pub fn set_custom_curve(points: &[CurvePoint]) -> Result<Frame, FrameError> {
     Ok(Frame::new(CMD_FAN_CURVE, payload))
 }
 
-/// Frames the vendor client sends after connecting.
+/// Builds the vendor initialisation used by the calibration command.
+///
+/// Clears the stored fault, sets fan mode and interval, and sends the observed
+/// `0x04(35 00)` command whose semantics remain unknown. Ordinary monitoring
+/// needs only [`connect`].
 #[must_use]
 pub fn init_sequence(interval: RefreshInterval, mode: FanMode) -> Vec<Frame> {
     vec![
@@ -453,6 +477,19 @@ mod tests {
     }
 
     #[test]
+    fn curve_rejects_invalid_percentages() {
+        let mut points = [CurvePoint {
+            temperature_c: 40,
+            duty_percent: 100,
+        }];
+        assert!(set_custom_curve(&points).is_ok());
+        for duty in [101, 255] {
+            points[0].duty_percent = duty;
+            assert!(set_custom_curve(&points).is_err(), "accepted duty {duty}");
+        }
+    }
+
+    #[test]
     fn custom_curve_matches_capture() {
         let points = [
             CurvePoint {
@@ -483,7 +520,7 @@ mod tests {
         }; 200];
         assert!(matches!(
             set_custom_curve(&points),
-            Err(FrameError::PayloadTooLong(_))
+            Err(CurveError::Frame(FrameError::PayloadTooLong(_)))
         ));
     }
 

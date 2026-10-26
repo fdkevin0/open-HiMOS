@@ -14,8 +14,12 @@ path = "src/main.rs"
 [dependencies]
 eframe = { workspace = true }
 himos-core = { path = "../himos-core" }
-egui_plot = "0.33"
-image = { version = "0.25", default-features = false, features = ["png"] }
+egui_plot = "0.38"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Preserve the Wayland title bar when eframe defaults are disabled.
+winit = { version = "0.30", default-features = false, features = ["wayland-csd-adwaita"] }
 
 [lints]
 workspace = true

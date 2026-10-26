@@ -19,8 +19,8 @@ pub const HEAD: [u8; 2] = [0x55, 0x7E];
 pub const TAIL: u8 = 0xAE;
 /// Largest payload the one-byte length field can describe.
 pub const MAX_PAYLOAD: usize = 253;
-/// Largest possible frame: [`MAX_PAYLOAD`] plus command, checksum, and markers.
-pub const MAX_FRAME: usize = MAX_PAYLOAD + 4;
+/// Largest possible frame: [`MAX_PAYLOAD`] plus length, command, checksum, and markers.
+pub const MAX_FRAME: usize = MAX_PAYLOAD + 6;
 /// Frame length overhead: two header bytes, the length byte, and the tail.
 const FRAME_OVERHEAD: usize = 4;
 /// Bytes buffered before the splitter declares the stream unsynchronised.
@@ -136,7 +136,7 @@ impl Frame {
     /// Returns [`FrameError`] when the slice is too short, has wrong markers,
     /// declares a different length, or fails the checksum.
     pub fn decode(raw: &[u8]) -> Result<Self, FrameError> {
-        if raw.len() < FRAME_OVERHEAD + 1 {
+        if raw.len() < FRAME_OVERHEAD + 2 {
             return Err(FrameError::TooShort(raw.len()));
         }
         if raw[..2] != HEAD || raw[raw.len() - 1] != TAIL {
@@ -224,6 +224,32 @@ impl FrameReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_length_one_and_recovers_the_next_frame() {
+        let malformed = [0x55, 0x7e, 0x01, 0x97, 0xae];
+        assert_eq!(Frame::decode(&malformed), Err(FrameError::TooShort(5)));
+        let valid = hex_to_bytes("557e0484000051ae");
+        let mut reader = FrameReader::new();
+        assert_eq!(reader.feed(&malformed), Vec::<Frame>::new());
+        assert_eq!(reader.feed(&valid).len(), 1);
+    }
+
+    #[test]
+    fn maximum_payload_fits_the_documented_frame_size() {
+        let mut raw = Frame::new(0x02, vec![0; MAX_PAYLOAD])
+            .encode()
+            .expect("maximum payload fits");
+        assert_eq!(raw.len(), MAX_FRAME);
+        raw[MAX_FRAME - 2] = crc8(&raw[..MAX_FRAME - 2]);
+        assert_eq!(
+            Frame::decode(&raw)
+                .expect("valid device frame")
+                .payload()
+                .len(),
+            MAX_PAYLOAD
+        );
+    }
 
     #[test]
     fn host_frames_match_captured_bytes() {

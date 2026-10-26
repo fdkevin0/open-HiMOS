@@ -10,8 +10,8 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use himos_core::dm850g::{
     AuxTelemetry, CMD_AUX, CMD_INFO, CMD_SERIAL, CMD_STATUS, CurvePoint, DeviceInfo, FanMode,
-    PsuStatus, RefreshInterval, SerialNumber, connect, init_sequence, set_custom_curve,
-    set_fan_mode, set_refresh_interval,
+    PsuStatus, RefreshInterval, SerialNumber, connect, set_custom_curve, set_fan_mode,
+    set_refresh_interval,
 };
 use himos_core::transport::SerialLink;
 
@@ -46,8 +46,8 @@ enum Command {
         /// Custom curve points as `TEMP,DUTY` (repeatable, applied in order).
         #[arg(long = "curve", value_name = "TEMP,DUTY")]
         curve: Vec<String>,
-        /// Skip the vendor initialisation sequence.
-        #[arg(long)]
+        /// Compatibility flag: monitoring no longer sends vendor initialisation.
+        #[arg(long, hide = true)]
         no_init: bool,
     },
     /// List serial ports that could host the PSU.
@@ -83,7 +83,7 @@ fn main() -> Result<()> {
             fan_mode,
             clear_fault,
             curve,
-            no_init,
+            no_init: _,
         } => monitor(&Options {
             port,
             seconds,
@@ -91,7 +91,6 @@ fn main() -> Result<()> {
             fan_mode,
             clear_fault,
             curve,
-            no_init,
         }),
         Command::Ports => {
             let detected = SerialLink::detect().unwrap_or(None);
@@ -148,10 +147,11 @@ struct Options {
     fan_mode: Option<FanMode>,
     clear_fault: bool,
     curve: Vec<String>,
-    no_init: bool,
 }
 
 fn monitor(options: &Options) -> Result<()> {
+    let duration =
+        Duration::try_from_secs_f64(options.seconds).context("invalid monitoring duration")?;
     let port = resolve_port(options.port.as_deref())?;
     let link = SerialLink::open_retry(&port).with_context(|| format!("opening {port}"))?;
     let mut session = himos_core::Session::new(link);
@@ -159,16 +159,31 @@ fn monitor(options: &Options) -> Result<()> {
     session.send(&connect()).context("sending connect")?;
     std::thread::sleep(Duration::from_millis(300));
 
+    send_controls(&mut session, options)?;
+
+    let start = Instant::now();
+    let mut buf = [0u8; 256];
+    while start.elapsed() < duration {
+        for frame in session.poll(&mut buf).context("reading frames")? {
+            print_frame(&frame);
+        }
+    }
+    Ok(())
+}
+
+fn send_controls<L: himos_core::Link>(
+    session: &mut himos_core::Session<L>,
+    options: &Options,
+) -> Result<()> {
     let interval = match options.interval {
         Some(ms) => RefreshInterval::try_new(ms).map_err(|err| anyhow::anyhow!(err.to_string()))?,
         None => RefreshInterval::default(),
     };
-    if !options.no_init {
-        for frame in init_sequence(interval, options.fan_mode.unwrap_or(FanMode::Auto)) {
-            session.send(&frame).context("sending init frame")?;
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
+    let curve = if options.curve.is_empty() {
+        None
+    } else {
+        Some(set_custom_curve(&parse_points(&options.curve)?).context("building custom curve")?)
+    };
     if options.clear_fault {
         session
             .send(&himos_core::dm850g::clear_fault())
@@ -187,20 +202,11 @@ fn monitor(options: &Options) -> Result<()> {
             .context("sending interval")?;
         println!("sent: interval {} ms", interval.millis());
     }
-    if !options.curve.is_empty() {
-        let points = parse_points(&options.curve)?;
-        let frame = set_custom_curve(&points).context("building custom curve")?;
+    if let Some(frame) = curve {
         session.send(&frame).context("sending custom curve")?;
-        println!("sent: custom curve with {} points", points.len());
+        println!("sent: custom curve with {} points", options.curve.len());
     }
 
-    let deadline = Instant::now() + Duration::from_secs_f64(options.seconds);
-    let mut buf = [0u8; 256];
-    while Instant::now() < deadline {
-        for frame in session.poll(&mut buf).context("reading frames")? {
-            print_frame(&frame);
-        }
-    }
     Ok(())
 }
 
@@ -296,6 +302,71 @@ fn hex_to_bytes(s: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct RecordingLink(Vec<u8>);
+
+    impl himos_core::Link for RecordingLink {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Ok(0)
+        }
+        fn write_all(&mut self, data: &[u8]) -> std::io::Result<()> {
+            self.0.extend_from_slice(data);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn invalid_durations_fail_before_opening_a_port() {
+        for seconds in [-1.0, f64::NAN, f64::INFINITY, f64::MAX] {
+            let options = Options {
+                port: Some("missing-test-port".into()),
+                seconds,
+                interval: None,
+                fan_mode: None,
+                clear_fault: false,
+                curve: Vec::new(),
+            };
+            let error = monitor(&options).expect_err("invalid duration");
+            assert!(error.to_string().contains("duration"), "{error:#}");
+            for phase in 0..3 {
+                let mut durations = [0.0; 3];
+                durations[phase] = seconds;
+                let error = calibrate::run(&calibrate::Options {
+                    port: "missing-test-port".into(),
+                    idle_s: durations[0],
+                    load_s: durations[1],
+                    tail_s: durations[2],
+                    csv: None,
+                })
+                .expect_err("invalid phase duration");
+                assert!(error.to_string().contains("duration"), "{error:#}");
+            }
+        }
+    }
+
+    #[test]
+    fn monitoring_only_sends_explicit_controls() {
+        let mut options = Options {
+            port: None,
+            seconds: 10.0,
+            interval: None,
+            fan_mode: None,
+            clear_fault: false,
+            curve: Vec::new(),
+        };
+        let mut session = himos_core::Session::new(RecordingLink::default());
+        send_controls(&mut session, &options).expect("no controls requested");
+        assert_eq!(session.into_inner().0, Vec::<u8>::new());
+        options.fan_mode = Some(FanMode::Silent);
+        let mut session = himos_core::Session::new(RecordingLink::default());
+        send_controls(&mut session, &options).expect("explicit fan control");
+        assert_eq!(
+            session.into_inner().0,
+            set_fan_mode(FanMode::Silent).encode().expect("valid frame")
+        );
+        assert!(Cli::try_parse_from(["himos", "monitor", "--no-init"]).is_ok());
+    }
 
     #[test]
     fn parses_well_formed_curve_points() {

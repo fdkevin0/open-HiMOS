@@ -361,7 +361,7 @@ pub(crate) fn resolve(
 pub(crate) fn apply(ctx: &egui::Context, palette: Palette, theme: Theme) {
     set_palette(palette);
     let dark = theme == Theme::Dark;
-    let mut style: Style = (*ctx.style()).clone();
+    let mut style: Style = (*ctx.style_of(theme)).clone();
     style.visuals = if dark {
         Visuals::dark()
     } else {
