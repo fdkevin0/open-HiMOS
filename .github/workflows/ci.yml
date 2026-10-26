@@ -2,18 +2,29 @@ name: ci
 
 on:
   push:
+    branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  # Keep each main commit: cancelling a version bump could lose its release.
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
 jobs:
-  test:
+  check:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        os: [ubuntu-22.04, windows-2022]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install Linux GUI and serial dependencies
         if: runner.os == 'Linux'
@@ -24,23 +35,89 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
+          components: ${{ runner.os == 'Linux' && 'clippy,rustfmt' || '' }}
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Release automation tests
+        if: runner.os == 'Linux'
+        run: node --test .github/scripts/release.test.cjs
+
       - name: Formatting
+        if: runner.os == 'Linux'
         run: cargo fmt --all -- --check
 
       - name: Lints
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        if: runner.os == 'Linux'
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       - name: Tests
-        run: cargo test --all
+        run: cargo test --locked --workspace
+
+      - name: Protocol without serial transport
+        if: runner.os == 'Linux'
+        run: cargo test --locked -p himos-core --no-default-features
 
       - name: Documentation
-        run: cargo doc -p himos-core --no-deps
+        if: runner.os == 'Linux'
+        run: cargo doc --locked -p himos-core --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
 
-      - name: Build
-        run: cargo build --release
+      - name: Minimum supported Rust version
+        if: runner.os == 'Linux'
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal
+          cargo +1.95.0 check --locked --workspace --all-targets
+
+  release:
+    name: Release changed version
+    needs: check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Detect workspace version change
+        id: version
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          python - <<'PY'
+          import os
+          import subprocess
+          import tomllib
+          from pathlib import Path
+
+          current = tomllib.loads(Path("Cargo.toml").read_text())["workspace"]["package"]["version"]
+          before = os.environ["BEFORE"]
+          if before == "0" * 40:
+              print("Initial branch push: use the manual Release workflow for the first release.")
+          else:
+              previous = subprocess.check_output(["git", "show", f"{before}:Cargo.toml"], text=True)
+              previous = tomllib.loads(previous)["workspace"]["package"]["version"]
+              if current != previous:
+                  with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+                      print(f"tag=v{current}", file=output)
+          PY
+
+      - name: Tag checked commit and dispatch dist
+        if: steps.version.outputs.tag != ''
+        uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        with:
+          script: |
+            await require('./.github/scripts/release.cjs')({
+              github, context, core, tag: process.env.RELEASE_TAG
+            });

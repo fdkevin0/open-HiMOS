@@ -1,0 +1,2 @@
+- name: Test on the release platform
+  run: cargo test --locked --workspace
