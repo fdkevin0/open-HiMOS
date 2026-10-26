@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "skills": {
+    "rust-best-practices": {
+      "source": "morganlinton/BeautifulRust",
+      "sourceType": "github",
+      "skillPath": "skills/rust-best-practices/SKILL.md",
+      "computedHash": "0684ce970d4656b5f79875c1c0c3643ab972847b8bbd4fcb3b3a61e8c06ecf6a"
+    },
+    "rust-port": {
+      "source": "morganlinton/BeautifulRust",
+      "sourceType": "github",
+      "skillPath": "skills/rust-port/SKILL.md",
+      "computedHash": "049b502f5aded5b47f79892687f8a922d52b388755e9792e4b0714a3e97cd409"
+    },
+    "rust-review": {
+      "source": "morganlinton/BeautifulRust",
+      "sourceType": "github",
+      "skillPath": "skills/rust-review/SKILL.md",
+      "computedHash": "e50b408390db6d75497ae0e0a4211d1f81586bfe440a5ce601a8d8a751dd7a4d"
+    }
+  }
+}
