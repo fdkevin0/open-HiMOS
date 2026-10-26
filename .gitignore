@@ -1,0 +1,18 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Local reverse-engineering workspace (captures, vendor app, driver installer)
+_research/
+driver/
+.agents/
+
+# Runtime/portable data directory fallback (see README)
+.open-HiMOS/
+
+# Python bytecode from the retired prototype
+__pycache__/
+*.pyc
+
+# Local logs
+*.log
