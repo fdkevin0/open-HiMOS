@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Removed the stale `lints/` snapshot directory; the effective lint configuration is the root
+  `clippy.toml` plus `[workspace.lints]` (documented in `docs/lint-config.md`).
+
 ## 0.1.0 — 2026-10-27
 
 Initial public release.

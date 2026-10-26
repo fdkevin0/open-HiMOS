@@ -5,18 +5,21 @@ Date: 2026-10-26 · Upstream: [morganlinton/BeautifulRust](https://github.com/mo
 
 ## Summary
 
-The workspace uses the upstream lints with one structural split: rules marked `[lib]` live in
-`himos-core` (the only library), because Cargo does not allow a member to extend an inherited
-`[lints]` table. Everything else is in `[workspace.lints]`.
+The effective configuration is the root `clippy.toml` plus `[workspace.lints]`. One structural
+split is required: rules marked `[lib]` live in `himos-core` (the only library), because Cargo
+does not allow a member to extend an inherited `[lints]` table.
 
 ```text
-clippy.toml                     # upstream copy (max-fn-params-bools = 0, test allowances, …)
-lints/lints.toml                # upstream copy, kept for diffing/upgrading
+clippy.toml                     # upstream clippy settings (max-fn-params-bools = 0, …)
 Cargo.toml                      # [workspace.lints]: upstream set minus the 5 [lib] rules
 crates/himos-core/Cargo.toml    # complete [lints], including the 5 [lib] rules
 crates/himos-cli/Cargo.toml     # [lints] workspace = true
 crates/himos-gui/Cargo.toml     # [lints] workspace = true
 ```
+
+A local `lints/` snapshot of the upstream files used to be kept for diffing. It was removed: it
+was stale/mismatched and could be mistaken for the configuration actually in effect. The files
+above are the single source of truth.
 
 Strict mode is the CI gate:
 
@@ -26,15 +29,11 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all
 ```
 
-## What was fixed while wiring the upstream configuration
+## Why the split
 
-| # | Issue | Fix |
-| --- | --- | --- |
-| 1 | only `lints/clippy.toml` existed; the root `clippy.toml` was missing, so `max-fn-params-bools` and test allowances were inactive | copied to the repository root |
-| 2 | `[workspace.lints]` was a subset of upstream (missing `missing_docs`, `missing_panics_doc`, `missing_errors_doc`, `multiple_unsafe_ops_per_block`, `print_stdout`, `print_stderr`, `redundant_clone`, `rc_buffer`, `string_add`, `wildcard_imports`, `module_inception`, `enum_glob_use`) | filled from the current upstream file |
-| 3 | `lints/lints.toml` was stale (2845 → 3560 bytes upstream) | downloaded again |
-| 4 | `himos-core` used `#![deny(missing_docs)]` instead of lint configuration | attribute removed; lints own it |
-| 5 | upstream now ships three skills (`rust-best-practices`, `rust-review`, `rust-port`) | installed locally for development, not vendored |
+Cargo rejects a member manifest that reopens an inherited lint table (`failed to load manifest`).
+The five library-only rules therefore live in the only library crate, while all other rules live
+in the workspace table.
 
 ## Evidence that the configuration is active
 
@@ -42,7 +41,7 @@ cargo test --all
    `unknown field name … clippy.toml:13`.
 2. **Rules take effect**: a probe `#[test]` calling `Option::unwrap()` in `himos-core` failed
    `-D warnings` with `clippy::unwrap_used` (probe removed afterwards).
-3. **Full gate passes**: `fmt`, `clippy -D warnings`, `test --all` (see repository CI).
+3. **The full gate passes** in CI (`fmt`, `clippy -D warnings`, `test --all`, `cargo doc`).
 
 ## Known upstream/toolchain difference
 

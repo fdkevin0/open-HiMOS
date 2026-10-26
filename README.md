@@ -166,9 +166,9 @@ cargo doc -p himos-core --no-deps
 Linux GUI builds need `pkg-config libudev-dev libxkbcommon-dev libwayland-dev libx11-dev
 libxcursor-dev libxrandr-dev libxi-dev` (see [CI](.github/workflows/ci.yml)).
 
-Rust style follows [BeautifulRust](https://github.com/morganlinton/BeautifulRust) (`clippy.toml`,
-`lints/lints.toml`, `[workspace.lints]`). The upstream skill files are a local development aid and
-are not vendored in this repository.
+Rust style follows [BeautifulRust](https://github.com/morganlinton/BeautifulRust): the root
+`clippy.toml` and `[workspace.lints]` are the effective configuration. The upstream skill files are
+a local development aid and are not vendored in this repository.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow.
 

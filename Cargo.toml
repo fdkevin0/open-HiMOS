@@ -20,9 +20,9 @@ thiserror = "2"
 
 # BeautifulRust lints, workspace form.
 #
-# The lib-only entries from lints/lints.toml (missing_docs, missing_panics_doc,
-# missing_errors_doc, print_stdout, print_stderr) live in `crates/himos-core/Cargo.toml`,
-# because Cargo does not let a member extend an inherited `[lints]` table.
+# The lib-only entries (missing_docs, missing_panics_doc, missing_errors_doc,
+# print_stdout, print_stderr) live in `crates/himos-core/Cargo.toml`, because Cargo
+# does not let a member extend an inherited `[lints]` table.
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"
 missing_debug_implementations = "warn"
