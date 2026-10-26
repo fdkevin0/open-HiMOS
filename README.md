@@ -12,10 +12,9 @@ and is implemented here as a typed, tested Rust library.
 
 ## Quick start
 
-Requirements: Rust stable (MSRV 1.85), a CH340 USB-serial driver, and a supported PSU.
+Requirements: Rust stable (MSRV 1.95), a CH340 USB-serial driver, and a supported PSU.
 
 ```bash
-cargo test --all                      # protocol golden vectors + unit tests
 cargo run -p himos-cli -- selftest    # offline replay of captured frames
 cargo run -p himos-cli -- ports       # list serial ports, mark the detected PSU
 cargo run -p himos-cli -- monitor     # auto-detect and read telemetry
@@ -31,48 +30,10 @@ seconds, so unplug/replug does not require restarting it.
   three temperatures.
 - **Control**: fan mode (auto/silent/overclock/custom/dust), reporting interval, custom fan curve,
   clear stored fault.
-- **Progressive disclosure**: Overview (three headline numbers) → Details (every measurement) →
+- **Progressive disclosure**: Overview (power, rails, temperatures and device health) → Details (measurements and registers) →
   Advanced (write commands + event log) → History (recorded telemetry and trend chart).
 - **Scope**: digital-PSU capabilities only. No host CPU/GPU telemetry, no LCD or pump-screen
   integration.
-
-## Screenshots
-
-![Overview](docs/gui-overview.png)
-
-<details>
-<summary>More screenshots: details, advanced, history, themes</summary>
-
-**Details** — every measurement, AC input, registers, thermal breakdown.
-
-![Details](docs/gui-details.png)
-
-**Advanced** — fan control, interval, custom curve, maintenance, appearance, event log.
-
-![Advanced](docs/gui-advanced.png)
-
-**History** — fixed-scale trend chart (default 1 h), window statistics, CSV export.
-
-![History](docs/gui-history.png)
-
-**Light theme** — follows the OS appearance and accent colour.
-
-![Light](docs/gui-overview-light.png)
-
-**Custom accent** — `--accent rose` overrides the OS accent for one run.
-
-![Rose](docs/gui-overview-rose.png)
-
-Screenshots are rendered by the application itself and can be reproduced on any machine:
-
-```bash
-cargo run -p himos-gui -- --screenshot docs/gui-overview.png --theme dark
-cargo run -p himos-gui -- --screenshot docs/gui-overview-light.png --theme light
-cargo run -p himos-gui -- --screenshot docs/gui-history.png --level history --history-span 1m --settle 55
-cargo run -p himos-gui -- --help
-```
-
-</details>
 
 ## Interfaces
 
@@ -82,20 +43,29 @@ cargo run -p himos-gui -- --help
 | --- | --- |
 | `himos ports` | enumerate serial ports and mark the detected PSU |
 | `himos monitor` | auto-detect, stream parsed telemetry (optionally write fan mode/curve) |
-| `himos calibrate` | controlled-load calibration for the extended (0x04) frame |
+| `himos calibrate` | extended-frame calibration; changes PSU settings and creates CPU load |
 | `himos selftest` | offline replay of captured frames; no hardware needed |
 
 <details>
 <summary>CLI options</summary>
 
 `himos monitor` accepts `--port` (manual override; auto-detection is the default), `--seconds`,
-`--fan-mode`, `--interval`, `--curve`, `--clear-fault`, and `--no-init`. `himos calibrate` accepts `--port`,
-`--idle`, `--load`, `--tail`, and `--csv`. Run `himos --help` / `himos <command> --help` for
+`--fan-mode`, `--interval`, `--curve`, and `--clear-fault`. Monitoring sends only the
+connection handshake unless a control flag is supplied; the legacy `--no-init` flag is accepted
+as a no-op. `himos calibrate` accepts `--port`,
+`--idle`, `--load`, `--tail`, and `--csv`. Calibration clears the stored fault, sets the fan to
+auto and the reporting interval to 1000 ms, sends the vendor’s unconfirmed `0x04(35 00)` command,
+and creates CPU load; it does not restore prior settings. Run `himos --help` / `himos <command> --help` for
 exact defaults.
 
 </details>
 
 ### GUI
+
+The GUI opens on Overview. Keys: 1/2/3/4 switch pages, F11 toggles fullscreen, Esc leaves it.
+
+<details>
+<summary>GUI options and diagnostic capture</summary>
 
 ```text
 himos-gui [OPTIONS]
@@ -114,10 +84,15 @@ himos-gui [OPTIONS]
 Keys: 1/2/3/4 pages · F11 fullscreen · Esc exit fullscreen
 ```
 
-`--smoke` and `--screenshot` are deterministic self-test hooks used by CI and documentation; they
-do not write the history archive and ignore saved window geometry.
+`--smoke` and `--screenshot` run the live GUI and serial worker; they are not offline fixtures
+and are not run by CI. They do not write the history archive and ignore saved window geometry.
+
+</details>
 
 ## How it is organised
+
+<details>
+<summary>Crates and runtime architecture</summary>
 
 | Crate | Responsibility |
 | --- | --- |
@@ -125,32 +100,33 @@ do not write the history archive and ignore saved window geometry.
 | [`crates/himos-cli`](crates/himos-cli) | `himos` CLI: monitor / calibrate / ports / selftest |
 | [`crates/himos-gui`](crates/himos-gui) | egui/eframe desktop panel with four disclosure levels |
 
-The GUI keeps the serial port on a worker thread and communicates through channels; all state
-shared with the UI is copyable values, so there are no locks on the paint path. The protocol
-library is `no_std`-agnostic in spirit: it performs no I/O itself except in the `transport`
-module.
+The GUI keeps the serial port on a worker thread and exchanges owned messages through channels.
+The library uses `std`; its optional `serial` feature supplies the serial transport.
+Disable default features to use the codec without that transport.
+
+</details>
 
 ## Documentation
 
 | Document | Read it when you want to… |
 | --- | --- |
 | [Protocol: DM-850G](docs/protocol-dm850g.md) | understand frames, fields, commands, and what is still unknown |
-| [Verification](docs/verification.md) | see the hardware and CI evidence behind the implementation |
+| [Verification](docs/verification.md) | run offline checks and hardware diagnostics |
 | [Driver download](docs/driver-download.md) | install the CH340 driver on Windows |
 | [Lint configuration](docs/lint-config.md) | review how BeautifulRust lints are wired into the workspace |
 
 <details>
-<summary>Design notes and evidence</summary>
+<summary>Implementation details</summary>
 
 - **Theme**: dual dark/light palettes; follows OS appearance on Windows and macOS, reads the
   system accent colour where the OS exposes one, and persists the user's choice. Details in
   [`crates/himos-gui/src/theme.rs`](crates/himos-gui/src/theme.rs).
-- **History**: 1 Hz ring buffer (2 h in memory) plus a rotating CSV archive; `egui_plot` renders
+- **History**: up to 1 Hz ring buffer (7,200 samples in memory) plus a rotating CSV archive; `egui_plot` renders
   a fixed-scale time axis. Details in [`crates/himos-gui/src/history.rs`](crates/himos-gui/src/history.rs).
 - **Window management**: native decorations, Snap Layouts, per-monitor DPI v2, geometry
   persistence, F11/Esc fullscreen. Details in [`crates/himos-gui/src/window.rs`](crates/himos-gui/src/window.rs).
-- **Rendering**: eframe glow (OpenGL 2.0+) with vsync, `HardwareAcceleration::Preferred`;
-  measured CPU is ~0.5% at 2 Hz telemetry.
+- **Rendering**: eframe uses the glow backend with default native options;
+  rendering details are in `crates/himos-gui/src/main.rs`.
 
 </details>
 

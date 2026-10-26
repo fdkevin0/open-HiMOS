@@ -12,8 +12,8 @@ cargo test --all
 cargo run -p himos-cli -- selftest     # no hardware required
 ```
 
-All four must pass before a pull request is reviewed. CI runs the same matrix on Windows and
-Ubuntu.
+All four must pass before a pull request is reviewed. CI runs formatting, lints, tests,
+documentation and a release build on Windows and Ubuntu; run the CLI selftest locally.
 
 ## Ground rules
 
@@ -22,7 +22,8 @@ Ubuntu.
   and an explicit note in `docs/protocol-dm850g.md` for anything still inferred.
 - Write commands are dangerous. New write paths need a clear failure mode when the link is down
   (the GUI refuses commands while offline; the CLI reports errors).
-- No `unwrap`/`expect` outside tests; `expect_used` is allowed for tests only.
+- Avoid panics on external input. `unwrap_used` warns; `expect_used` is allowed by the lint
+  configuration. Reserve `expect` for tests, fixed fixtures and documented internal invariants.
 - Documentation and UI text are English; UI capability stays limited to digital-PSU features.
 
 ## Hardware testing
@@ -46,7 +47,7 @@ Ubuntu.
 1. Describe the problem and the behaviour change.
 2. List the checks you ran (including whether real hardware was involved).
 3. Update `docs/` when the protocol, CLI flags, or data files change.
-4. Keep commits focused; the initial history is a single squashed release commit.
+4. Keep commits focused.
 
 ## License
 

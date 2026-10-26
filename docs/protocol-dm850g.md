@@ -28,7 +28,8 @@ Frame: `55 7E | LEN | CMD | PAYLOAD | CRC8 | AE`.
 
 - USB from the PSU to an internal motherboard header, exposed as a WCH CH340 (not CH341, but it
   uses the WCH CH341SER driver).
-- Serial settings: **115200 8N1**, `autoOpen=true`, `highWaterMark=65536`.
+- Serial settings: **115200 8N1**, no flow control. The vendor client used
+  `autoOpen=true`, `highWaterMark=65536`; these are client options, not wire settings.
 - Binary protocol: no text, no encryption, no authentication.
 - Test unit: model `DM-850G`, serial number redacted in this document, firmware `V28.25.06.09`,
   850 W 80+ Gold.
@@ -67,6 +68,11 @@ dev  → CMD=0x05                    serial number
 host → CMD=0x1E / 0x13 / 0x16 / 0x04(35 00)   four initialisation commands (semantics open)
 dev  → CMD=0x02 and CMD=0x04 alternating, about one frame each per second
 ```
+
+The sequence above records the vendor client. This project's GUI and `monitor` send only
+`connect()` unless a control is explicitly requested. `calibrate` still sends all four
+initialisation commands: clear fault, auto fan mode, 1000 ms reporting, and `0x04(35 00)`.
+It does not restore previous device settings.
 
 ### 3.1 Model frame `CMD=0x03`
 
@@ -130,7 +136,7 @@ which shows only voltage, power and temperature.
 | Fan overclock | `55 7E 04 13 00 02 49 AE` | payload `00 02` |
 | Fan custom | `55 7E 04 13 00 03 4E AE` | payload `00 03` |
 | Fan dust removal | `55 7E 04 13 00 04 5B AE` | payload `00 04` |
-| Reporting interval | `55 7E 04 16 00 0n 80 AE` | `CMD=0x16`, `n=(ms-1000)/500`; 1000/1500/2000/2500/3000 → 0/1/2/3/4 |
+| Reporting interval | `55 7E 04 16 00 0n CRC AE` | `CMD=0x16`, CRC varies with `n`; `n=(ms-1000)/500`; 1000/1500/2000/2500/3000 → 0/1/2/3/4 |
 | Custom fan curve | `55 7E 1D 1B …` | `CMD=0x1B`, see below |
 | Clear stored fault | `55 7E 04 1E 00 00 D6 AE` | `CMD=0x1E` |
 
