@@ -2,14 +2,7 @@
 
 ## Offline checks
 
-Run the checks in [CONTRIBUTING](../CONTRIBUTING.md). [CI](../.github/workflows/ci.yml)
-runs formatting, Clippy, tests, documentation and a release build on Windows and Ubuntu.
-
-```bash
-cargo run -p himos-cli -- selftest
-```
-
-The selftest replays captured protocol frames without opening a serial port.
+Run the [contribution checks](../CONTRIBUTING.md#checks); they do not need a connected PSU.
 
 ## Hardware diagnostics
 
@@ -28,9 +21,6 @@ reconnecting the device. Verify write commands individually on the target firmwa
 
 ## Current implementation
 
-- GUI and `monitor` connect with a handshake; controls are sent only on explicit request.
-  `calibrate` sends the vendor initialisation, including fault clearing, auto fan mode,
-  a 1000 ms interval and the unconfirmed `0x04(35 00)` command, before creating CPU load.
 - History retains up to 7,200 samples in memory, samples fresh telemetry at most once per second,
   and rotates the CSV archive past 8 MiB. The chart starts empty on each launch.
 - `--smoke` and `--screenshot` use the real worker and window; they need hardware for live data

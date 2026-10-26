@@ -1,54 +1,68 @@
 # Contributing
 
-Thanks for helping. This project talks to real power supplies, so correctness and safety beat
-speed.
-
-## Quick checklist
+## Checks
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all
-cargo run -p himos-cli -- selftest     # no hardware required
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace
+cargo test --locked -p himos-core --no-default-features
+RUSTDOCFLAGS="-D warnings" cargo doc --locked -p himos-core --no-deps
+cargo run --locked -p himos-cli -- selftest
+node --test .github/scripts/release.test.cjs
 ```
 
-All four must pass before a pull request is reviewed. CI runs formatting, lints, tests,
-documentation and a release build on Windows and Ubuntu; run the CLI selftest locally.
+[CI](.github/workflows/ci.yml) runs on PRs and `main`: Linux runs quality checks, tests and
+an additional Rust 1.95 compilation check; Windows runs native tests. Superseded PR runs are
+cancelled. Release builds run separately.
 
-## Ground rules
+Lint settings live in `clippy.toml` and the workspace Cargo manifest. The core manifest repeats
+shared rules and adds library-specific lints because Cargo cannot extend an inherited table.
+Update both tables when changing a shared rule.
 
-- Keep `himos-core` free of OS/GUI dependencies; I/O belongs in `transport` or in the front ends.
-- Every protocol change needs a test: golden frame vectors for framing, field checks for decoding,
-  and an explicit note in `docs/protocol-dm850g.md` for anything still inferred.
-- Write commands are dangerous. New write paths need a clear failure mode when the link is down
-  (the GUI refuses commands while offline; the CLI reports errors).
-- Avoid panics on external input. `unwrap_used` warns; `expect_used` is allowed by the lint
-  configuration. Reserve `expect` for tests, fixed fixtures and documented internal invariants.
-- Documentation and UI text are English; UI capability stays limited to digital-PSU features.
+## Changes
 
-## Hardware testing
+- Keep protocol logic in `himos-core`; serial I/O belongs in `transport` or the front ends.
+- Test protocol changes with captured vectors; mark inferred fields in the
+  [protocol notes](docs/protocol-dm850g.md).
+- Validate external input without panicking. Write paths must report disconnected links.
+- Keep documentation and UI text in English, and features limited to digital PSUs.
+- Describe the behaviour change and checks in the PR; include firmware/model for hardware tests.
+
+Close the vendor client before hardware testing. Write commands affect the PSU immediately;
+verify one at a time on a machine you can safely disturb. See [verification](docs/verification.md).
+
+## Releases
+
+1. Update `workspace.package.version` in `Cargo.toml`, run `cargo check --workspace` to update
+   `Cargo.lock`, and commit both in a PR.
+2. Merge into `main`. Once CI passes, it creates `v<VERSION>` at that commit and dispatches dist.
+3. dist runs native tests, builds separate CLI/GUI archives for Windows x64 and Linux x64, and
+   publishes them with checksums to GitHub Releases.
+
+Unchanged or already-published versions are skipped. Existing tags are never moved. The workflows
+use `GITHUB_TOKEN` with contents/actions write permissions; no PAT or crates.io publishing is needed.
 
 <details>
-<summary>Safety notes</summary>
+<summary>First release, retry and workflow maintenance</summary>
 
-- Close the official HiMOS client before running tools that open the serial port; it takes
-  exclusive ownership.
-- Write commands change fan behaviour immediately. Verify one command at a time and keep a fan
-  mode you can tolerate.
-- Never attach the PSU to a machine you cannot afford to disturb while testing custom curves or
-  interval changes.
-- If you test on a firmware variant other than `V28.25.06.09`, record model, firmware, and the
-  observed frames in the pull request.
+For an initial release without changing versions, run **Actions → Release** on tested `main`
+with the current version tag. For a failed release, rerun that workflow run or dispatch against
+its existing tag, not a newer branch. Wait for the previous attempt to finish before retrying.
+Use `dry-run` as the input tag to build without publishing. PRs only check the dist plan.
+
+Use [dist 0.33.1](https://axodotdev.github.io/cargo-dist/book/install.html) to edit and validate
+release configuration:
+
+```bash
+dist generate
+dist generate --check
+dist plan
+```
+
+Edit `dist-workspace.toml` and `.github/dist-build-setup.yml`; do not hand-edit generated
+`release.yml`. Linux archives use Ubuntu 22.04 system libraries. Windows binaries are unsigned.
 
 </details>
 
-## Pull requests
-
-1. Describe the problem and the behaviour change.
-2. List the checks you ran (including whether real hardware was involved).
-3. Update `docs/` when the protocol, CLI flags, or data files change.
-4. Keep commits focused.
-
-## License
-
-Contributions are dual licensed under Apache-2.0 and MIT, matching the rest of the project.
+Contributions are dual licensed under Apache-2.0 and MIT.

@@ -155,21 +155,7 @@ which shows only voltage, power and temperature.
   `custom` array.
 - The two constant tables still need more samples to be fully understood **[unknown]**.
 
-## 7. Implementation in this repository
-
-```text
-crates/himos-core/src/frame.rs    framing, CRC, streaming decoder, golden-vector tests
-crates/himos-core/src/dm850g.rs   CMD 0x02/0x03/0x05/0x04 telemetry and control commands
-crates/himos-core/src/link.rs     Link trait + Session (link + decoder combined)
-crates/himos-core/src/transport.rs serialport transport (Windows/Linux)
-crates/himos-cli                  himos monitor / calibrate / ports / selftest
-crates/himos-gui                  egui desktop panel, four disclosure levels
-```
-
-Validation: `cargo test --all` (protocol golden vectors, including byte-exact host frames);
-offline replay: `cargo run -p himos-cli -- selftest`.
-
-## 8. Open questions
+## 7. Open questions
 
 1. **`CMD=0x04` field units** — needs another controlled-load calibration.
 2. **`0x04(35 00)` semantics** — fourth initialisation command; not reproduced from the UI.
@@ -178,7 +164,7 @@ offline replay: `cargo run -p himos-cli -- selftest`.
    device-confirmed.
 5. Firmware upgrade flow and LCD/pump-screen links (separate transports, out of scope).
 
-## 9. Reproducing the capture (for review purposes)
+## 8. Reproducing the capture (for review purposes)
 
 <details>
 <summary>Method</summary>
